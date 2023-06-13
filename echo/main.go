@@ -5,12 +5,29 @@ import (
 	"github.com/christianotieno/go-rest-api/cache"
 	"github.com/christianotieno/go-rest-api/user"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"gopkg.in/mgo.v2/bson"
 	"net/http"
 	"strings"
 )
 
 type jsonResponse map[string]interface{}
+
+func serverCache(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		if cache.Serve(c.Response(), c.Request()) {
+			return nil
+		}
+		return next(c)
+	}
+}
+
+func cacheResponse(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		c.Response().Writer = cache.NewWriter(c.Response().Writer, c.Request())
+		return next(c)
+	}
+}
 
 func usersOptions(c echo.Context) error {
 	methods := []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodOptions}
@@ -24,9 +41,6 @@ func userOptions(c echo.Context) error {
 	return c.NoContent(http.StatusOK)
 }
 func usersGetAll(c echo.Context) error {
-	if cache.Serve(c.Response(), c.Request()) {
-		return nil
-	}
 	users, err := user.All()
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError)
@@ -34,7 +48,6 @@ func usersGetAll(c echo.Context) error {
 	if c.Request().Method == http.MethodHead {
 		return c.NoContent(http.StatusOK)
 	}
-	c.Response().Writer = cache.NewWriter(c.Response().Writer, c.Request())
 	return c.JSON(http.StatusOK, jsonResponse{"users": users})
 }
 
@@ -58,9 +71,6 @@ func usersPostOne(c echo.Context) error {
 }
 
 func usersGetOne(c echo.Context) error {
-	if cache.Serve(c.Response(), c.Request()) {
-		return nil
-	}
 	if !bson.IsObjectIdHex(c.Param("id")) {
 		return echo.NewHTTPError(http.StatusNotFound)
 	}
@@ -75,7 +85,6 @@ func usersGetOne(c echo.Context) error {
 	if c.Request().Method == http.MethodHead {
 		return c.NoContent(http.StatusOK)
 	}
-	c.Response().Writer = cache.NewWriter(c.Response().Writer, c.Request())
 	return c.JSON(http.StatusOK, jsonResponse{"user": u})
 }
 
@@ -99,7 +108,6 @@ func usersPutOne(c echo.Context) error {
 	}
 	cache.Drop("/users")
 	cache.Drop(cache.MakeResource(c.Request()))
-	c.Response().Writer = cache.NewWriter(c.Response().Writer, c.Request())
 	return c.JSON(http.StatusOK, jsonResponse{"user": u})
 }
 
@@ -133,7 +141,6 @@ func usersPatchOne(c echo.Context) error {
 	}
 	cache.Drop("/users")
 	cache.Drop(cache.MakeResource(c.Request()))
-	c.Response().Writer = cache.NewWriter(c.Response().Writer, c.Request())
 	return c.JSON(http.StatusOK, jsonResponse{"user": u})
 }
 
@@ -158,26 +165,41 @@ func root(c echo.Context) error {
 	return c.String(http.StatusOK, "Running API v1!")
 }
 
+func auth(username, password string, c echo.Context) (bool, error) {
+	if username == "Peter" && password == "password" {
+		return true, nil
+	}
+	return false, nil
+}
+
 func main() {
 	e := echo.New()
+
+	e.Pre(middleware.RemoveTrailingSlash())
+
+	e.Use(middleware.Recover())
+
+	e.Use(middleware.LoggerWithConfig(middleware.LoggerConfig{
+		Format: "${method}, ${uri}, ${status}, ${latency_human}\n",
+	}))
 
 	e.GET("/", root)
 
 	u := e.Group("/users")
 
 	u.OPTIONS("", usersOptions)
-	u.HEAD("", usersGetAll)
-	u.GET("", usersGetAll)
-	u.POST("", usersPostOne)
+	u.HEAD("", usersGetAll, serverCache, cacheResponse)
+	u.GET("", usersGetAll, serverCache, cacheResponse)
+	u.POST("", usersPostOne, middleware.BasicAuth(auth))
 
 	uid := u.Group("/:id")
 
 	uid.OPTIONS("", userOptions)
-	uid.HEAD("", usersGetOne)
-	uid.GET("", usersGetOne)
-	uid.PUT("", usersPutOne)
-	uid.PATCH("", usersPatchOne)
-	uid.DELETE("", usersDeleteOne)
+	uid.HEAD("", usersGetOne, serverCache, cacheResponse)
+	uid.GET("", usersGetOne, serverCache, cacheResponse)
+	uid.PUT("", usersPutOne, serverCache, cacheResponse, middleware.BasicAuth(auth))
+	uid.PATCH("", usersPatchOne, serverCache, cacheResponse, middleware.BasicAuth(auth))
+	uid.DELETE("", usersDeleteOne, middleware.BasicAuth(auth))
 
-	_ = e.Start(":8000")
+	e.Logger.Fatal(e.Start(":8000"))
 }
